@@ -1,6 +1,6 @@
 """
-COMPLETE MEMORY & COMPUTE TRACKING FOR STREAMLIT
-Single file for all tracking and monitoring needs
+MEMORY AND COMPUTE RESOURCE TRACKER FOR STREAMLIT
+Tracks resource usage and saves metrics to CSV files for analysis
 """
 
 import streamlit as st
@@ -8,9 +8,10 @@ import psutil
 import time
 import threading
 import sys
-import json
+import csv
+import os
 from datetime import datetime
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, List
 import pandas as pd
 
 # ============================================================
@@ -103,6 +104,55 @@ def get_global_metrics():
     }
 
 # ============================================================
+# CSV FILE MANAGEMENT
+# ============================================================
+
+def get_csv_filepath(filename_base="metrics"):
+    """Generate CSV filepath with timestamp"""
+    timestamp = datetime.now().strftime("%Y%m%d")
+    return f"{filename_base}_{timestamp}.csv"
+
+def ensure_csv_headers(filepath, headers):
+    """Ensure CSV file exists with headers"""
+    if not os.path.exists(filepath):
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+
+def write_metrics_to_csv(metrics_dict, csv_type="operations"):
+    """Write metrics to appropriate CSV file"""
+    
+    if csv_type == "operations":
+        filepath = get_csv_filepath("operation_metrics")
+        headers = [
+            'timestamp', 'session_id', 'operation', 'duration_seconds',
+            'start_mb', 'end_mb', 'peak_mb', 'peak_increase_mb', 
+            'final_increase_mb', 'had_spike', 'avg_cpu_percent', 
+            'max_cpu_percent', 'samples_collected'
+        ]
+    elif csv_type == "checkpoints":
+        filepath = get_csv_filepath("checkpoint_metrics")
+        headers = [
+            'timestamp', 'session_id', 'checkpoint_name',
+            'total_memory_mb', 'session_memory_mb', 'cpu_percent'
+        ]
+    elif csv_type == "summary":
+        filepath = get_csv_filepath("summary_metrics")
+        headers = [
+            'timestamp', 'active_sessions', 'total_operations',
+            'current_memory_mb', 'peak_memory_mb', 'cpu_percent',
+            'estimated_per_user_mb', 'projection_150_users_gb'
+        ]
+    else:
+        return
+    
+    ensure_csv_headers(filepath, headers)
+    
+    with open(filepath, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writerow(metrics_dict)
+
+# ============================================================
 # SESSION TRACKING
 # ============================================================
 
@@ -113,8 +163,6 @@ def init_session_tracking():
         st.session_state.session_id = str(uuid.uuid4())[:8]
         st.session_state.session_start = datetime.now()
         st.session_state.operation_count = 0
-        st.session_state.memory_checkpoints = []
-        st.session_state.operation_history = []
         
         # Register session globally
         global_metrics = get_global_metrics()
@@ -125,6 +173,16 @@ def init_session_tracking():
                 'operations': 0,
                 'peak_memory_mb': 0
             }
+        
+        # Log session start
+        write_metrics_to_csv({
+            'timestamp': datetime.now().isoformat(),
+            'session_id': st.session_state.session_id,
+            'checkpoint_name': 'session_start',
+            'total_memory_mb': psutil.Process().memory_info().rss / (1024 * 1024),
+            'session_memory_mb': 0,
+            'cpu_percent': psutil.cpu_percent(interval=0.1)
+        }, csv_type="checkpoints")
 
 def get_session_memory():
     """Calculate memory used by current session state"""
@@ -132,18 +190,16 @@ def get_session_memory():
     for key, value in st.session_state.items():
         try:
             session_size += sys.getsizeof(value)
-            # Try to get size of nested objects
             if hasattr(value, '__dict__'):
                 session_size += sys.getsizeof(value.__dict__)
             elif isinstance(value, (list, dict, tuple, set)):
-                # Rough estimate for collections
-                session_size += sum(sys.getsizeof(item) for item in value)
+                session_size += sum(sys.getsizeof(item) for item in value[:100])  # Sample first 100 items
         except:
             pass
     return session_size / (1024 * 1024)  # Return in MB
 
 # ============================================================
-# TRACKING DECORATORS
+# TRACKING DECORATOR
 # ============================================================
 
 def track_resource_usage(operation_name: str):
@@ -153,7 +209,6 @@ def track_resource_usage(operation_name: str):
     Usage:
         @track_resource_usage("load_json")
         def your_function():
-            # your code
             return data
     """
     def decorator(func):
@@ -170,9 +225,26 @@ def track_resource_usage(operation_name: str):
                 # Stop tracking
                 duration = time.time() - start_time
                 stats = tracker.stop()
-                stats['duration_seconds'] = round(duration, 2)
-                stats['operation'] = operation_name
-                stats['timestamp'] = datetime.now().isoformat()
+                
+                # Prepare metrics for CSV
+                metrics = {
+                    'timestamp': datetime.now().isoformat(),
+                    'session_id': st.session_state.get('session_id', 'unknown'),
+                    'operation': operation_name,
+                    'duration_seconds': round(duration, 2),
+                    'start_mb': stats['start_mb'],
+                    'end_mb': stats['end_mb'],
+                    'peak_mb': stats['peak_mb'],
+                    'peak_increase_mb': stats['peak_increase_mb'],
+                    'final_increase_mb': stats['final_increase_mb'],
+                    'had_spike': stats['had_spike'],
+                    'avg_cpu_percent': stats['avg_cpu_percent'],
+                    'max_cpu_percent': stats['max_cpu_percent'],
+                    'samples_collected': stats['samples_collected']
+                }
+                
+                # Write to CSV
+                write_metrics_to_csv(metrics, csv_type="operations")
                 
                 # Update global metrics
                 global_metrics = get_global_metrics()
@@ -186,28 +258,39 @@ def track_resource_usage(operation_name: str):
                     global_metrics['total_cpu_seconds'] += duration * (stats['avg_cpu_percent'] / 100)
                     
                     # Update session metrics
-                    if st.session_state.session_id in global_metrics['session_metrics']:
+                    if st.session_state.get('session_id') in global_metrics['session_metrics']:
                         session = global_metrics['session_metrics'][st.session_state.session_id]
                         session['operations'] += 1
                         session['peak_memory_mb'] = max(session['peak_memory_mb'], stats['peak_mb'])
                 
-                # Store in session state
+                # Increment session operation count
+                if 'operation_count' not in st.session_state:
+                    st.session_state.operation_count = 0
                 st.session_state.operation_count += 1
-                if 'operation_history' not in st.session_state:
-                    st.session_state.operation_history = []
-                st.session_state.operation_history.append(stats)
-                
-                # Warnings for high resource usage
-                if stats['peak_increase_mb'] > 100:
-                    st.warning(f"⚠️ High memory in {operation_name}: {stats['peak_mb']:.0f} MB peak")
-                if stats['max_cpu_percent'] > 80:
-                    st.warning(f"⚠️ High CPU in {operation_name}: {stats['max_cpu_percent']:.0f}%")
                 
                 return result
                 
             except Exception as e:
                 tracker.stop()
-                st.error(f"❌ Error in {operation_name}: {str(e)}")
+                
+                # Log error to CSV
+                error_metrics = {
+                    'timestamp': datetime.now().isoformat(),
+                    'session_id': st.session_state.get('session_id', 'unknown'),
+                    'operation': operation_name,
+                    'duration_seconds': time.time() - start_time,
+                    'start_mb': tracker.start_mb,
+                    'end_mb': 0,
+                    'peak_mb': tracker.peak_mb,
+                    'peak_increase_mb': 0,
+                    'final_increase_mb': 0,
+                    'had_spike': False,
+                    'avg_cpu_percent': 0,
+                    'max_cpu_percent': 0,
+                    'samples_collected': 0
+                }
+                write_metrics_to_csv(error_metrics, csv_type="operations")
+                
                 raise e
         
         return wrapper
@@ -228,145 +311,159 @@ def checkpoint(name: str):
     cpu_percent = psutil.cpu_percent(interval=0.1)
     
     checkpoint_data = {
-        'name': name,
-        'time': datetime.now().strftime('%H:%M:%S'),
+        'timestamp': datetime.now().isoformat(),
+        'session_id': st.session_state.get('session_id', 'unknown'),
+        'checkpoint_name': name,
         'total_memory_mb': round(current_mb, 1),
         'session_memory_mb': round(session_mb, 2),
         'cpu_percent': round(cpu_percent, 1)
     }
     
-    if 'memory_checkpoints' not in st.session_state:
-        st.session_state.memory_checkpoints = []
-    st.session_state.memory_checkpoints.append(checkpoint_data)
+    # Write to CSV
+    write_metrics_to_csv(checkpoint_data, csv_type="checkpoints")
     
     return checkpoint_data
 
 # ============================================================
-# DASHBOARD DISPLAY
+# SUMMARY METRICS WRITER
 # ============================================================
 
-def display_resource_monitor():
-    """
-    Complete resource monitoring dashboard for sidebar
-    CALL THIS IN YOUR SIDEBAR
-    """
+def write_summary_metrics():
+    """Write current summary metrics to CSV"""
     
-    # Initialize session if needed
-    init_session_tracking()
+    # Current system metrics
+    process = psutil.Process()
+    current_memory_mb = process.memory_info().rss / (1024 * 1024)
+    cpu_percent = psutil.cpu_percent(interval=0.1)
     
-    with st.sidebar:
-        st.header(f"📊 Resource Monitor")
-        st.caption(f"Session: {st.session_state.session_id}")
+    # Get global metrics
+    global_metrics = get_global_metrics()
+    peak_memory_mb = max(global_metrics['absolute_peak_mb'], current_memory_mb)
+    active_sessions = len(global_metrics['active_sessions'])
+    
+    # Calculate projections
+    baseline_mb = 500  # Streamlit base overhead
+    if active_sessions > 0:
+        per_user_mb = (current_memory_mb - baseline_mb) / active_sessions
+    else:
+        per_user_mb = 0
+    
+    projection_150_users_gb = (baseline_mb + per_user_mb * 150) / 1024
+    
+    summary_data = {
+        'timestamp': datetime.now().isoformat(),
+        'active_sessions': active_sessions,
+        'total_operations': global_metrics['total_operations'],
+        'current_memory_mb': round(current_memory_mb, 1),
+        'peak_memory_mb': round(peak_memory_mb, 1),
+        'cpu_percent': round(cpu_percent, 1),
+        'estimated_per_user_mb': round(per_user_mb, 1),
+        'projection_150_users_gb': round(projection_150_users_gb, 2)
+    }
+    
+    write_metrics_to_csv(summary_data, csv_type="summary")
+    
+    return summary_data
+
+# ============================================================
+# REPORT GENERATION
+# ============================================================
+
+def generate_load_test_report():
+    """Generate comprehensive load test report from CSV files"""
+    
+    report_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_filename = f"load_test_report_{report_timestamp}.txt"
+    
+    with open(report_filename, 'w') as report:
+        report.write("STREAMLIT LOAD TEST REPORT\n")
+        report.write("=" * 50 + "\n")
+        report.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         
-        # Current system metrics
-        process = psutil.Process()
-        current_memory_mb = process.memory_info().rss / (1024 * 1024)
-        session_memory_mb = get_session_memory()
-        cpu_percent = psutil.cpu_percent(interval=0.1)
-        
-        # Get global metrics
-        global_metrics = get_global_metrics()
-        peak_memory_mb = max(global_metrics['absolute_peak_mb'], current_memory_mb)
-        active_sessions = len(global_metrics['active_sessions'])
-        
-        # Display main metrics
-        st.subheader("Current Status")
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Memory", f"{current_memory_mb:.0f} MB")
-            st.metric("Session", f"{session_memory_mb:.1f} MB")
-        
-        with col2:
-            st.metric("Peak", f"{peak_memory_mb:.0f} MB")
-            st.metric("CPU", f"{cpu_percent:.1f}%")
-        
-        with col3:
-            st.metric("Sessions", active_sessions)
-            st.metric("Ops", st.session_state.get('operation_count', 0))
-        
-        # Memory analysis
-        if peak_memory_mb > current_memory_mb * 1.2:
-            peak_ratio = peak_memory_mb / current_memory_mb
-            st.warning(f"⚠️ Peak was {peak_ratio:.1f}x current")
-        
-        # Operation breakdown
-        if global_metrics['operation_stats']:
-            st.subheader("Operations")
-            for op_name, stats in global_metrics['operation_stats'].items():
-                with st.expander(f"{op_name}"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.text(f"Duration: {stats.get('duration_seconds', 0):.1f}s")
-                        st.text(f"Memory: +{stats['final_increase_mb']} MB")
-                        st.text(f"Peak: {stats['peak_mb']} MB")
-                    with col2:
-                        st.text(f"CPU Avg: {stats['avg_cpu_percent']}%")
-                        st.text(f"CPU Max: {stats['max_cpu_percent']}%")
-                        if stats['had_spike']:
-                            st.text("⚠️ Memory spike")
-        
-        # Checkpoints
-        if st.session_state.get('memory_checkpoints'):
-            if st.checkbox("Show Checkpoints"):
-                df = pd.DataFrame(st.session_state.memory_checkpoints)
-                st.dataframe(
-                    df[['name', 'total_memory_mb', 'cpu_percent']], 
-                    hide_index=True,
-                    use_container_width=True
-                )
-        
-        # Load test projection
-        st.subheader("150 User Projection")
-        
-        # Calculate projections
-        baseline_mb = 500  # Streamlit base
-        
-        # Conservative (using peak)
-        per_user_peak = max(peak_memory_mb - baseline_mb, session_memory_mb) / max(active_sessions, 1)
-        projection_peak_gb = (baseline_mb + per_user_peak * 150) / 1024
-        
-        # Current-based
-        per_user_current = max(current_memory_mb - baseline_mb, session_memory_mb) / max(active_sessions, 1)
-        projection_current_gb = (baseline_mb + per_user_current * 150) / 1024
-        
-        # CPU projection
-        cpu_per_user = cpu_percent / max(active_sessions, 1)
-        projected_cpu = cpu_per_user * 150
-        
-        st.info(f"""
-        **Memory (peak):** {projection_peak_gb:.1f} GB
-        **Memory (current):** {projection_current_gb:.1f} GB
-        **CPU projection:** {projected_cpu:.0f}%
-        """)
-        
-        # Status indicator
-        if projection_peak_gb > 200:
-            st.error("❌ Won't handle 150 users")
-            st.caption("Need optimization!")
-        elif projection_peak_gb > 150:
-            st.warning("⚠️ Risky for 150 users")
-        elif projected_cpu > 80:
-            st.warning("⚠️ CPU may bottleneck")
-        else:
-            st.success("✅ Should handle 150 users")
-        
-        # Export button
-        if st.button("📥 Export Metrics"):
-            metrics_data = {
-                'timestamp': datetime.now().isoformat(),
-                'session_id': st.session_state.session_id,
-                'current_memory_mb': current_memory_mb,
-                'peak_memory_mb': peak_memory_mb,
-                'operations': global_metrics['operation_stats'],
-                'checkpoints': st.session_state.get('memory_checkpoints', []),
-                'projection_150_users_gb': projection_peak_gb
-            }
+        # Read and analyze operation metrics
+        operations_file = get_csv_filepath("operation_metrics")
+        if os.path.exists(operations_file):
+            df_ops = pd.read_csv(operations_file)
             
-            filename = f"metrics_{st.session_state.session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            with open(filename, 'w') as f:
-                json.dump(metrics_data, f, indent=2, default=str)
-            st.success(f"Exported to {filename}")
+            report.write("OPERATION STATISTICS\n")
+            report.write("-" * 30 + "\n")
+            
+            for operation in df_ops['operation'].unique():
+                op_data = df_ops[df_ops['operation'] == operation]
+                report.write(f"\nOperation: {operation}\n")
+                report.write(f"  Total calls: {len(op_data)}\n")
+                report.write(f"  Avg duration: {op_data['duration_seconds'].mean():.2f} seconds\n")
+                report.write(f"  Avg memory increase: {op_data['final_increase_mb'].mean():.1f} MB\n")
+                report.write(f"  Peak memory: {op_data['peak_mb'].max():.1f} MB\n")
+                report.write(f"  Avg CPU: {op_data['avg_cpu_percent'].mean():.1f}%\n")
+                report.write(f"  Memory spikes: {op_data['had_spike'].sum()} occurrences\n")
+        
+        # Read and analyze summary metrics
+        summary_file = get_csv_filepath("summary_metrics")
+        if os.path.exists(summary_file):
+            df_summary = pd.read_csv(summary_file)
+            
+            report.write("\n\nSUMMARY STATISTICS\n")
+            report.write("-" * 30 + "\n")
+            report.write(f"Max concurrent sessions: {df_summary['active_sessions'].max()}\n")
+            report.write(f"Total operations: {df_summary['total_operations'].max()}\n")
+            report.write(f"Peak memory: {df_summary['peak_memory_mb'].max():.1f} MB\n")
+            report.write(f"Avg memory: {df_summary['current_memory_mb'].mean():.1f} MB\n")
+            report.write(f"Max CPU: {df_summary['cpu_percent'].max():.1f}%\n")
+            
+            report.write("\n\nLOAD CAPACITY PROJECTION\n")
+            report.write("-" * 30 + "\n")
+            
+            # Get latest projection
+            latest = df_summary.iloc[-1] if not df_summary.empty else None
+            if latest is not None:
+                projection_gb = latest['projection_150_users_gb']
+                report.write(f"Estimated per user: {latest['estimated_per_user_mb']:.1f} MB\n")
+                report.write(f"Projection for 150 users: {projection_gb:.2f} GB\n")
+                
+                if projection_gb > 200:
+                    report.write("Status: FAIL - Will not handle 150 users\n")
+                    report.write("Recommendation: Implement caching optimizations\n")
+                elif projection_gb > 150:
+                    report.write("Status: WARNING - May struggle with 150 users\n")
+                    report.write("Recommendation: Monitor closely and optimize\n")
+                else:
+                    report.write("Status: PASS - Should handle 150 users\n")
+                    report.write("Recommendation: Proceed with deployment\n")
+    
+    return report_filename
+
+# ============================================================
+# PERIODIC SUMMARY WRITER
+# ============================================================
+
+@st.cache_resource
+def get_summary_writer():
+    """Background thread that periodically writes summary metrics"""
+    class SummaryWriter:
+        def __init__(self, interval=30):  # Write every 30 seconds
+            self.interval = interval
+            self.running = False
+            self.thread = None
+            
+        def start(self):
+            if not self.running:
+                self.running = True
+                self.thread = threading.Thread(target=self._write_loop, daemon=True)
+                self.thread.start()
+        
+        def stop(self):
+            self.running = False
+            
+        def _write_loop(self):
+            while self.running:
+                try:
+                    write_summary_metrics()
+                except:
+                    pass
+                time.sleep(self.interval)
+    
+    return SummaryWriter()
 
 # ============================================================
 # INTEGRATION INSTRUCTIONS
@@ -376,29 +473,29 @@ def display_resource_monitor():
 HOW TO INTEGRATE INTO YOUR STREAMLIT APP:
 
 1. IMPORT AT THE TOP OF YOUR APP:
-   ```python
+   
    from memory_compute_tracker import (
        track_resource_usage,
        checkpoint,
        init_session_tracking,
-       display_resource_monitor
+       write_summary_metrics,
+       generate_load_test_report
    )
-   ```
 
 2. INITIALIZE IN YOUR MAIN FUNCTION:
-   ```python
+   
    def main():
        # Initialize tracking
        init_session_tracking()
        
-       # Add monitor to sidebar
-       display_resource_monitor()
+       # Start periodic summary writing
+       summary_writer = get_summary_writer()
+       summary_writer.start()
        
        # Your app code...
-   ```
 
 3. ADD DECORATOR TO FUNCTIONS YOU WANT TO TRACK:
-   ```python
+   
    @track_resource_usage("load_json")
    @st.cache_resource  # Keep your existing decorators
    def load_json_data():
@@ -407,54 +504,39 @@ HOW TO INTEGRATE INTO YOUR STREAMLIT APP:
    
    @track_resource_usage("azure_openai_call")
    def call_llm(prompt):
-       # Your LLM code
        return response
    
    @track_resource_usage("pdf_processing")
    def process_pdf(file):
-       # Your PDF processing
        return result
-   
-   @track_resource_usage("azure_search")
-   def search_index(query):
-       # Your search code
-       return results
-   ```
 
 4. ADD CHECKPOINTS FOR DETAILED TRACKING (OPTIONAL):
-   ```python
-   checkpoint("app_start")
    
-   # Heavy operation
+   checkpoint("app_start")
    data = load_json_data()
    checkpoint("after_json_load")
-   
-   # Another operation
    results = process_data(data)
    checkpoint("after_processing")
-   ```
 
-5. WHAT YOU'LL SEE IN THE SIDEBAR:
-   - Current memory usage
-   - Peak memory usage  
-   - CPU usage
-   - Per-operation breakdown
-   - Memory spikes detection
-   - 150-user projection
-   - Red/Yellow/Green status
+5. GENERATE REPORT AFTER TESTING:
+   
+   if st.button("Generate Load Test Report"):
+       report_file = generate_load_test_report()
+       st.success(f"Report saved to {report_file}")
 
-6. KEY METRICS TO WATCH:
-   - Peak Memory > 200GB for 150 users = RED (won't work)
-   - Peak Memory 150-200GB = YELLOW (risky)
-   - Peak Memory < 150GB = GREEN (should work)
-   - CPU projection > 80% = May have CPU bottleneck
+OUTPUT FILES:
+- operation_metrics_YYYYMMDD.csv: Detailed operation tracking
+- checkpoint_metrics_YYYYMMDD.csv: Memory checkpoints
+- summary_metrics_YYYYMMDD.csv: Overall system metrics
+- load_test_report_YYYYMMDD_HHMMSS.txt: Comprehensive analysis
 
-The tracker will automatically:
-- Detect memory spikes during operations
-- Track CPU usage
-- Calculate per-user resource needs
-- Project capacity for 150 users
-- Warn about resource-intensive operations
+KEY METRICS IN CSV:
+- Memory usage (current, peak, increase)
+- CPU usage (average, maximum)
+- Operation duration
+- Memory spikes detection
+- Per-user estimates
+- 150-user projections
 """
 
 # ============================================================
@@ -466,36 +548,27 @@ def test_tracking():
     
     @track_resource_usage("test_operation")
     def sample_operation():
-        # Simulate memory allocation
         data = ["x" * 1000000 for _ in range(10)]
         time.sleep(0.5)
         return len(data)
     
-    # Run test
     checkpoint("before_test")
     result = sample_operation()
     checkpoint("after_test")
     
-    st.success(f"Test complete! Processed {result} items. Check sidebar for metrics.")
+    write_summary_metrics()
+    
+    print(f"Test complete. Check CSV files in current directory.")
+    print(f"Files created:")
+    print(f"  - {get_csv_filepath('operation_metrics')}")
+    print(f"  - {get_csv_filepath('checkpoint_metrics')}")
+    print(f"  - {get_csv_filepath('summary_metrics')}")
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="Resource Tracker Test", layout="wide")
-    
-    # Initialize
+    # Test the tracking system
     init_session_tracking()
-    display_resource_monitor()
+    test_tracking()
     
-    # Test UI
-    st.title("Resource Tracking Test")
-    
-    if st.button("Run Test"):
-        test_tracking()
-    
-    if st.checkbox("Show Detailed Metrics"):
-        global_metrics = get_global_metrics()
-        st.json({
-            'peak_memory_mb': global_metrics['absolute_peak_mb'],
-            'total_operations': global_metrics['total_operations'],
-            'active_sessions': len(global_metrics['active_sessions']),
-            'operations': global_metrics['operation_stats']
-        })
+    # Generate report
+    report = generate_load_test_report()
+    print(f"\nReport generated: {report}")
