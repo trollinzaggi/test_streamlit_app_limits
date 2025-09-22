@@ -549,6 +549,94 @@ def get_summary_writer():
     return SummaryWriter()
 
 # ============================================================
+# INTEGRATION INSTRUCTIONS FOR STREAMLIT APP
+# ============================================================
+
+"""
+HOW TO INTEGRATE INTO YOUR STREAMLIT APP:
+
+1. IMPORT AT THE TOP OF YOUR APP:
+   
+   from memory_compute_tracker import (
+       track_resource_usage,
+       checkpoint,
+       init_session_tracking,
+       write_summary_metrics,
+       get_summary_writer,
+       generate_load_test_report
+   )
+
+2. INITIALIZE IN YOUR MAIN FUNCTION:
+   
+   def main():
+       # Initialize tracking
+       init_session_tracking()
+       
+       # Start periodic summary writing (every 30 seconds)
+       summary_writer = get_summary_writer()
+       summary_writer.start()
+       
+       # Your app code...
+
+3. ADD DECORATOR TO FUNCTIONS YOU WANT TO TRACK:
+   
+   @track_resource_usage("load_json")
+   @st.cache_resource  # Keep your existing decorators
+   def load_json_data():
+       with open('file.json', 'r') as f:
+           return json.load(f)
+   
+   @track_resource_usage("azure_openai_call")
+   def call_llm(prompt):
+       # Your LLM code
+       return response
+   
+   @track_resource_usage("pdf_processing")
+   def process_pdf(file):
+       # Your PDF processing
+       return result
+   
+   @track_resource_usage("azure_search")
+   def search_index(query):
+       # Your search code
+       return results
+
+4. ADD CHECKPOINTS FOR DETAILED TRACKING (OPTIONAL):
+   
+   checkpoint("app_start")
+   data = load_json_data()
+   checkpoint("after_json_load")
+   results = process_data(data)
+   checkpoint("after_processing")
+
+5. FOR MULTI-PAGE APPS:
+   
+   # In your main app.py entry point:
+   if 'tracking_initialized' not in st.session_state:
+       st.session_state.tracking_initialized = True
+       init_session_tracking()
+       summary_writer = get_summary_writer()
+       summary_writer.start()
+   
+   # In each page file, just import and use decorators:
+   from memory_compute_tracker import track_resource_usage, checkpoint
+
+6. OUTPUT FILES (saved to METRICS_OUTPUT_DIR):
+   - operation_metrics_YYYYMMDD.csv: Detailed operation tracking
+   - checkpoint_metrics_YYYYMMDD.csv: Memory checkpoints
+   - summary_metrics_YYYYMMDD.csv: Overall system metrics
+   - load_test_report_YYYYMMDD_HHMMSS.txt: Comprehensive analysis
+
+7. KEY METRICS TRACKED:
+   - Memory usage (current, peak, increase)
+   - CPU usage (average, maximum)
+   - Operation duration
+   - Memory spikes detection
+   - Per-user estimates
+   - 150-user projections
+"""
+
+# ============================================================
 # JUPYTER NOTEBOOK USAGE EXAMPLE
 # ============================================================
 
