@@ -1,6 +1,6 @@
 """
 MEMORY AND COMPUTE RESOURCE TRACKER FOR STREAMLIT
-Tracks resource usage and saves metrics to CSV files for analysis
+Tracks resource usage and saves metrics to CSV files in a specified directory
 """
 
 import streamlit as st
@@ -13,6 +13,18 @@ import os
 from datetime import datetime
 from typing import Any, Optional, Dict, List
 import pandas as pd
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# CHANGE THIS TO YOUR DESIRED DIRECTORY PATH
+METRICS_OUTPUT_DIR = "/path/to/your/metrics/directory"  # <-- CHANGE THIS PATH
+
+def ensure_metrics_directory():
+    """Ensure the metrics output directory exists"""
+    if not os.path.exists(METRICS_OUTPUT_DIR):
+        os.makedirs(METRICS_OUTPUT_DIR)
 
 # ============================================================
 # CORE MEMORY TRACKER WITH PEAK DETECTION
@@ -108,9 +120,10 @@ def get_global_metrics():
 # ============================================================
 
 def get_csv_filepath(filename_base="metrics"):
-    """Generate CSV filepath with timestamp"""
+    """Generate CSV filepath with timestamp in the specified directory"""
+    ensure_metrics_directory()
     timestamp = datetime.now().strftime("%Y%m%d")
-    return f"{filename_base}_{timestamp}.csv"
+    return os.path.join(METRICS_OUTPUT_DIR, f"{filename_base}_{timestamp}.csv")
 
 def ensure_csv_headers(filepath, headers):
     """Ensure CSV file exists with headers"""
@@ -366,71 +379,141 @@ def write_summary_metrics():
     return summary_data
 
 # ============================================================
-# REPORT GENERATION
+# REPORT GENERATION (CAN BE CALLED FROM EXTERNAL SCRIPT)
 # ============================================================
 
-def generate_load_test_report():
-    """Generate comprehensive load test report from CSV files"""
+def generate_load_test_report(metrics_dir=None, output_dir=None):
+    """
+    Generate comprehensive load test report from CSV files
+    
+    Args:
+        metrics_dir: Directory containing the CSV files (defaults to METRICS_OUTPUT_DIR)
+        output_dir: Directory to save the report (defaults to metrics_dir)
+    
+    Returns:
+        Path to the generated report file
+    
+    Can be called from Jupyter notebook:
+        from memory_compute_tracker import generate_load_test_report
+        report = generate_load_test_report(
+            metrics_dir="/path/to/metrics",
+            output_dir="/path/to/reports"
+        )
+    """
+    
+    # Use provided directory or default
+    if metrics_dir is None:
+        metrics_dir = METRICS_OUTPUT_DIR
+    
+    if output_dir is None:
+        output_dir = metrics_dir
+    
+    # Ensure output directory exists
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
     
     report_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_filename = f"load_test_report_{report_timestamp}.txt"
+    report_filename = os.path.join(output_dir, f"load_test_report_{report_timestamp}.txt")
+    
+    # Get date for CSV files
+    csv_date = datetime.now().strftime("%Y%m%d")
     
     with open(report_filename, 'w') as report:
         report.write("STREAMLIT LOAD TEST REPORT\n")
         report.write("=" * 50 + "\n")
-        report.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        report.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        report.write(f"Metrics Directory: {metrics_dir}\n\n")
         
         # Read and analyze operation metrics
-        operations_file = get_csv_filepath("operation_metrics")
+        operations_file = os.path.join(metrics_dir, f"operation_metrics_{csv_date}.csv")
         if os.path.exists(operations_file):
             df_ops = pd.read_csv(operations_file)
             
             report.write("OPERATION STATISTICS\n")
             report.write("-" * 30 + "\n")
             
-            for operation in df_ops['operation'].unique():
-                op_data = df_ops[df_ops['operation'] == operation]
-                report.write(f"\nOperation: {operation}\n")
-                report.write(f"  Total calls: {len(op_data)}\n")
-                report.write(f"  Avg duration: {op_data['duration_seconds'].mean():.2f} seconds\n")
-                report.write(f"  Avg memory increase: {op_data['final_increase_mb'].mean():.1f} MB\n")
-                report.write(f"  Peak memory: {op_data['peak_mb'].max():.1f} MB\n")
-                report.write(f"  Avg CPU: {op_data['avg_cpu_percent'].mean():.1f}%\n")
-                report.write(f"  Memory spikes: {op_data['had_spike'].sum()} occurrences\n")
+            if not df_ops.empty:
+                for operation in df_ops['operation'].unique():
+                    op_data = df_ops[df_ops['operation'] == operation]
+                    report.write(f"\nOperation: {operation}\n")
+                    report.write(f"  Total calls: {len(op_data)}\n")
+                    report.write(f"  Avg duration: {op_data['duration_seconds'].mean():.2f} seconds\n")
+                    report.write(f"  Max duration: {op_data['duration_seconds'].max():.2f} seconds\n")
+                    report.write(f"  Avg memory increase: {op_data['final_increase_mb'].mean():.1f} MB\n")
+                    report.write(f"  Peak memory: {op_data['peak_mb'].max():.1f} MB\n")
+                    report.write(f"  Avg CPU: {op_data['avg_cpu_percent'].mean():.1f}%\n")
+                    report.write(f"  Max CPU: {op_data['max_cpu_percent'].max():.1f}%\n")
+                    report.write(f"  Memory spikes: {op_data['had_spike'].sum()} occurrences\n")
+            else:
+                report.write("No operation data found\n")
+        else:
+            report.write(f"Operation metrics file not found: {operations_file}\n")
+        
+        # Read and analyze checkpoint metrics
+        checkpoint_file = os.path.join(metrics_dir, f"checkpoint_metrics_{csv_date}.csv")
+        if os.path.exists(checkpoint_file):
+            df_check = pd.read_csv(checkpoint_file)
+            
+            report.write("\n\nCHECKPOINT STATISTICS\n")
+            report.write("-" * 30 + "\n")
+            
+            if not df_check.empty:
+                report.write(f"Total checkpoints: {len(df_check)}\n")
+                report.write(f"Unique sessions: {df_check['session_id'].nunique()}\n")
+                report.write(f"Max memory at checkpoint: {df_check['total_memory_mb'].max():.1f} MB\n")
+                report.write(f"Avg memory at checkpoints: {df_check['total_memory_mb'].mean():.1f} MB\n")
         
         # Read and analyze summary metrics
-        summary_file = get_csv_filepath("summary_metrics")
+        summary_file = os.path.join(metrics_dir, f"summary_metrics_{csv_date}.csv")
         if os.path.exists(summary_file):
             df_summary = pd.read_csv(summary_file)
             
             report.write("\n\nSUMMARY STATISTICS\n")
             report.write("-" * 30 + "\n")
-            report.write(f"Max concurrent sessions: {df_summary['active_sessions'].max()}\n")
-            report.write(f"Total operations: {df_summary['total_operations'].max()}\n")
-            report.write(f"Peak memory: {df_summary['peak_memory_mb'].max():.1f} MB\n")
-            report.write(f"Avg memory: {df_summary['current_memory_mb'].mean():.1f} MB\n")
-            report.write(f"Max CPU: {df_summary['cpu_percent'].max():.1f}%\n")
             
-            report.write("\n\nLOAD CAPACITY PROJECTION\n")
-            report.write("-" * 30 + "\n")
-            
-            # Get latest projection
-            latest = df_summary.iloc[-1] if not df_summary.empty else None
-            if latest is not None:
-                projection_gb = latest['projection_150_users_gb']
-                report.write(f"Estimated per user: {latest['estimated_per_user_mb']:.1f} MB\n")
-                report.write(f"Projection for 150 users: {projection_gb:.2f} GB\n")
+            if not df_summary.empty:
+                report.write(f"Total summary records: {len(df_summary)}\n")
+                report.write(f"Max concurrent sessions: {df_summary['active_sessions'].max()}\n")
+                report.write(f"Total operations: {df_summary['total_operations'].max()}\n")
+                report.write(f"Peak memory: {df_summary['peak_memory_mb'].max():.1f} MB\n")
+                report.write(f"Avg memory: {df_summary['current_memory_mb'].mean():.1f} MB\n")
+                report.write(f"Max CPU: {df_summary['cpu_percent'].max():.1f}%\n")
+                report.write(f"Avg CPU: {df_summary['cpu_percent'].mean():.1f}%\n")
                 
-                if projection_gb > 200:
+                report.write("\n\nLOAD CAPACITY PROJECTION\n")
+                report.write("-" * 30 + "\n")
+                
+                # Get latest projection
+                latest = df_summary.iloc[-1]
+                projection_gb = latest['projection_150_users_gb']
+                report.write(f"Based on latest metrics:\n")
+                report.write(f"  Estimated per user: {latest['estimated_per_user_mb']:.1f} MB\n")
+                report.write(f"  Projection for 150 users: {projection_gb:.2f} GB\n")
+                
+                # Average projection
+                avg_projection = df_summary['projection_150_users_gb'].mean()
+                report.write(f"\nAverage projection: {avg_projection:.2f} GB\n")
+                
+                # Max projection (worst case)
+                max_projection = df_summary['projection_150_users_gb'].max()
+                report.write(f"Worst-case projection: {max_projection:.2f} GB\n")
+                
+                report.write("\nASSESSMENT:\n")
+                if max_projection > 200:
                     report.write("Status: FAIL - Will not handle 150 users\n")
-                    report.write("Recommendation: Implement caching optimizations\n")
-                elif projection_gb > 150:
+                    report.write("Recommendation: Implement caching optimizations immediately\n")
+                elif max_projection > 150:
                     report.write("Status: WARNING - May struggle with 150 users\n")
-                    report.write("Recommendation: Monitor closely and optimize\n")
+                    report.write("Recommendation: Monitor closely and optimize further\n")
                 else:
                     report.write("Status: PASS - Should handle 150 users\n")
                     report.write("Recommendation: Proceed with deployment\n")
+            else:
+                report.write("No summary data found\n")
+        else:
+            report.write(f"Summary metrics file not found: {summary_file}\n")
     
+    print(f"Report generated: {report_filename}")
     return report_filename
 
 # ============================================================
@@ -466,109 +549,51 @@ def get_summary_writer():
     return SummaryWriter()
 
 # ============================================================
-# INTEGRATION INSTRUCTIONS
+# JUPYTER NOTEBOOK USAGE EXAMPLE
 # ============================================================
 
 """
-HOW TO INTEGRATE INTO YOUR STREAMLIT APP:
+USAGE FROM JUPYTER NOTEBOOK:
 
-1. IMPORT AT THE TOP OF YOUR APP:
-   
-   from memory_compute_tracker import (
-       track_resource_usage,
-       checkpoint,
-       init_session_tracking,
-       write_summary_metrics,
-       generate_load_test_report
-   )
+# Cell 1: Import and generate report
+from memory_compute_tracker import generate_load_test_report
 
-2. INITIALIZE IN YOUR MAIN FUNCTION:
-   
-   def main():
-       # Initialize tracking
-       init_session_tracking()
-       
-       # Start periodic summary writing
-       summary_writer = get_summary_writer()
-       summary_writer.start()
-       
-       # Your app code...
+# Generate report from specific directory
+report = generate_load_test_report(
+    metrics_dir="/path/to/your/metrics/directory",
+    output_dir="/path/to/save/reports"
+)
+print(f"Report saved: {report}")
 
-3. ADD DECORATOR TO FUNCTIONS YOU WANT TO TRACK:
-   
-   @track_resource_usage("load_json")
-   @st.cache_resource  # Keep your existing decorators
-   def load_json_data():
-       with open('file.json', 'r') as f:
-           return json.load(f)
-   
-   @track_resource_usage("azure_openai_call")
-   def call_llm(prompt):
-       return response
-   
-   @track_resource_usage("pdf_processing")
-   def process_pdf(file):
-       return result
+# Cell 2: Analyze CSV files directly
+import pandas as pd
+import matplotlib.pyplot as plt
 
-4. ADD CHECKPOINTS FOR DETAILED TRACKING (OPTIONAL):
-   
-   checkpoint("app_start")
-   data = load_json_data()
-   checkpoint("after_json_load")
-   results = process_data(data)
-   checkpoint("after_processing")
+# Read operation metrics
+df_ops = pd.read_csv("/path/to/metrics/operation_metrics_20241220.csv")
+df_summary = pd.read_csv("/path/to/metrics/summary_metrics_20241220.csv")
 
-5. GENERATE REPORT AFTER TESTING:
-   
-   if st.button("Generate Load Test Report"):
-       report_file = generate_load_test_report()
-       st.success(f"Report saved to {report_file}")
+# Plot memory over time
+plt.figure(figsize=(12, 6))
+plt.plot(pd.to_datetime(df_summary['timestamp']), df_summary['current_memory_mb'])
+plt.xlabel('Time')
+plt.ylabel('Memory (MB)')
+plt.title('Memory Usage Over Time')
+plt.show()
 
-OUTPUT FILES:
-- operation_metrics_YYYYMMDD.csv: Detailed operation tracking
-- checkpoint_metrics_YYYYMMDD.csv: Memory checkpoints
-- summary_metrics_YYYYMMDD.csv: Overall system metrics
-- load_test_report_YYYYMMDD_HHMMSS.txt: Comprehensive analysis
-
-KEY METRICS IN CSV:
-- Memory usage (current, peak, increase)
-- CPU usage (average, maximum)
-- Operation duration
-- Memory spikes detection
-- Per-user estimates
-- 150-user projections
+# Analyze operations
+print(df_ops.groupby('operation').agg({
+    'duration_seconds': ['mean', 'max'],
+    'peak_mb': 'max',
+    'had_spike': 'sum'
+}))
 """
-
-# ============================================================
-# TEST FUNCTION
-# ============================================================
-
-def test_tracking():
-    """Test function to verify tracking is working"""
-    
-    @track_resource_usage("test_operation")
-    def sample_operation():
-        data = ["x" * 1000000 for _ in range(10)]
-        time.sleep(0.5)
-        return len(data)
-    
-    checkpoint("before_test")
-    result = sample_operation()
-    checkpoint("after_test")
-    
-    write_summary_metrics()
-    
-    print(f"Test complete. Check CSV files in current directory.")
-    print(f"Files created:")
-    print(f"  - {get_csv_filepath('operation_metrics')}")
-    print(f"  - {get_csv_filepath('checkpoint_metrics')}")
-    print(f"  - {get_csv_filepath('summary_metrics')}")
 
 if __name__ == "__main__":
-    # Test the tracking system
-    init_session_tracking()
-    test_tracking()
+    # Example: Generate report for testing
+    print(f"Metrics will be saved to: {METRICS_OUTPUT_DIR}")
+    print("Remember to update METRICS_OUTPUT_DIR in this file!")
     
-    # Generate report
-    report = generate_load_test_report()
-    print(f"\nReport generated: {report}")
+    # Test report generation
+    # report = generate_load_test_report()
+    # print(f"Test report generated: {report}")
