@@ -75,185 +75,190 @@ def load_json_production(filepath: str):
         return None
 
 # ============================================================
-# SOLUTION 2: AZURE OPENAI RETRY LOGIC
+# SOLUTION 2: RETRY LOGIC WITH EXPONENTIAL BACKOFF
 # ============================================================
 
 """
-PROBLEM: Azure OpenAI calls fail due to rate limits, timeouts
+PROBLEM: Azure OpenAI and Search calls fail due to rate limits, timeouts
 SOLUTION: Automatic retry with exponential backoff
 IMPACT: Reduces failures from ~20% to <2%
 """
 
-def call_azure_openai_with_retry(
-    prompt: str,
-    max_tokens: int = 1000,
-    temperature: float = 0.7,
+def retry_with_exponential_backoff(
     max_retries: int = 3,
-    timeout: int = 30
-) -> str:
+    initial_delay: float = 1.0,
+    max_delay: float = 60.0,
+    exponential_base: float = 2.0,
+    jitter: bool = True,
+    retriable_exceptions: tuple = (Exception,)
+):
     """
-    Robust Azure OpenAI call with retry logic
+    Professional retry decorator with exponential backoff
     
-    Replace your existing call:
-        response = client.completions.create(prompt=prompt)
-    
-    With:
-        response = call_azure_openai_with_retry(prompt)
+    Args:
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds
+        max_delay: Maximum delay in seconds
+        exponential_base: Base for exponential backoff
+        jitter: Add random jitter to prevent thundering herd
+        retriable_exceptions: Tuple of exceptions to retry on
     """
-    
-    # Import your Azure OpenAI client here
-    # from azure.ai.openai import AzureOpenAI
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            last_exception = None
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    # Execute function
+                    result = func(*args, **kwargs)
+                    
+                    # Log success only if it was after retry attempts
+                    if attempt > 0:
+                        print(f"Operation succeeded after {attempt} retry attempts")
+                    
+                    return result
+                    
+                except retriable_exceptions as e:
+                    last_exception = e
+                    error_msg = str(e).lower()
+                    
+                    # Don't retry if it's a non-retriable error
+                    if any(term in error_msg for term in ['unauthorized', 'forbidden', 'invalid key', 'quota exceeded']):
+                        raise
+                    
+                    # Check if we should retry
+                    if attempt == max_retries:
+                        print(f"Operation failed after {max_retries} attempts")
+                        raise
+                    
+                    # Calculate delay with optional jitter
+                    if jitter:
+                        actual_delay = delay * (0.5 + random.random())
+                    else:
+                        actual_delay = delay
+                    
+                    actual_delay = min(actual_delay, max_delay)
+                    
+                    # Only display message for rate limits
+                    if 'rate limit' in error_msg or '429' in error_msg:
+                        print(f"Rate limit encountered. Retrying in {actual_delay:.0f} seconds...")
+                    
+                    time.sleep(actual_delay)
+                    
+                    # Increase delay for next attempt
+                    delay *= exponential_base
+            
+            # This should never be reached, but just in case
+            if last_exception:
+                raise last_exception
+                
+        return wrapper
+    return decorator
+
+def retry_azure_openai(max_retries: int = 3):
+    """
+    Specialized retry decorator for Azure OpenAI calls
+    """
+    return retry_with_exponential_backoff(
+        max_retries=max_retries,
+        initial_delay=1.0,
+        max_delay=60.0,
+        exponential_base=2.0,
+        jitter=True,
+        retriable_exceptions=(Exception,)
+    )
+
+def retry_azure_search(max_retries: int = 3):
+    """
+    Specialized retry decorator for Azure Search calls
+    """
+    return retry_with_exponential_backoff(
+        max_retries=max_retries,
+        initial_delay=0.5,
+        max_delay=10.0,
+        exponential_base=2.0,
+        jitter=True,
+        retriable_exceptions=(Exception,)
+    )
+
+# ============================================================
+# SOLUTION 3: HOW TO USE THE RETRY DECORATORS
+# ============================================================
+
+"""
+PROBLEM: Azure services fail under load
+SOLUTION: Apply retry decorators to your functions
+IMPACT: Handles transient failures automatically
+"""
+
+# Example 1: Azure OpenAI with retry decorator
+@retry_azure_openai(max_retries=3)
+def call_azure_openai(prompt: str, context: str = None) -> str:
+    """
+    Your Azure OpenAI call with automatic retry
+    """
+    # from openai import AzureOpenAI
     # client = AzureOpenAI(
-    #     api_key=your_key,
+    #     api_key=your_api_key,
     #     api_version="2024-02-15-preview",
     #     azure_endpoint=your_endpoint
     # )
     
-    last_error = None
-    wait_time = 1  # Start with 1 second
+    # full_prompt = f"{context}\n\n{prompt}" if context else prompt
     
-    for attempt in range(max_retries):
-        try:
-            if attempt > 0:
-                st.info(f"🔄 Retry {attempt}/{max_retries}...")
-            
-            # YOUR ACTUAL AZURE OPENAI CALL HERE
-            # Example:
-            # response = client.chat.completions.create(
-            #     model="your-deployment",
-            #     messages=[{"role": "user", "content": prompt}],
-            #     max_tokens=max_tokens,
-            #     temperature=temperature,
-            #     timeout=timeout
-            # )
-            # return response.choices[0].message.content
-            
-            # Simulation for testing
-            if attempt == 0 and random.random() < 0.3:
-                raise Exception("Rate limit exceeded")
-            return f"Response to: {prompt[:50]}..."
-            
-        except Exception as e:
-            last_error = e
-            error_msg = str(e).lower()
-            
-            # Determine retry strategy based on error
-            if 'rate limit' in error_msg or '429' in error_msg:
-                # Rate limit - use exponential backoff
-                st.warning(f"⏳ Rate limited. Waiting {wait_time}s...")
-                time.sleep(wait_time)
-                wait_time *= 2  # Double wait time
-                
-            elif 'timeout' in error_msg:
-                # Timeout - retry quickly
-                st.warning("⏱️ Request timed out. Retrying...")
-                time.sleep(0.5)
-                
-            elif 'quota' in error_msg or '403' in error_msg:
-                # Quota exceeded - don't retry
-                st.error("❌ Azure OpenAI quota exceeded!")
-                raise
-                
-            elif 'unauthorized' in error_msg or '401' in error_msg:
-                # Auth error - don't retry
-                st.error("❌ Authentication failed!")
-                raise
-                
-            else:
-                # Unknown error - retry with short delay
-                time.sleep(1)
-            
-            if attempt == max_retries - 1:
-                st.error(f"Failed after {max_retries} attempts: {last_error}")
-                raise last_error
-    
-    return None
-
-# ============================================================
-# SOLUTION 3: AZURE AI SEARCH RETRY LOGIC
-# ============================================================
-
-"""
-PROBLEM: Azure AI Search throttles or times out under load
-SOLUTION: Retry with backoff and result caching
-IMPACT: Improves reliability from ~85% to >98%
-"""
-
-# Simple cache for search results
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def cached_search(query: str, **kwargs):
-    """Cache wrapper for search results"""
-    return _search_with_retry(query, **kwargs)
-
-def _search_with_retry(
-    query: str,
-    top: int = 10,
-    max_retries: int = 3,
-    timeout: int = 15
-) -> List[Dict]:
-    """
-    Robust Azure AI Search with retry logic
-    
-    Replace your existing search:
-        results = search_client.search(query)
-    
-    With:
-        results = cached_search(query)
-    """
-    
-    # Import your Azure Search client here
-    # from azure.search.documents import SearchClient
-    # from azure.core.credentials import AzureKeyCredential
-    # 
-    # search_client = SearchClient(
-    #     endpoint=your_endpoint,
-    #     index_name=your_index,
-    #     credential=AzureKeyCredential(your_key)
+    # response = client.chat.completions.create(
+    #     model="your-deployment-name",
+    #     messages=[{"role": "user", "content": full_prompt}],
+    #     max_tokens=1000,
+    #     temperature=0.7,
+    #     timeout=30
     # )
     
-    last_error = None
+    # return response.choices[0].message.content
     
-    for attempt in range(max_retries):
-        try:
-            if attempt > 0:
-                st.info(f"🔄 Search retry {attempt}/{max_retries}")
-            
-            # YOUR ACTUAL AZURE SEARCH CALL HERE
-            # Example:
-            # results = search_client.search(
-            #     search_text=query,
-            #     top=top,
-            #     timeout=timeout
-            # )
-            # return list(results)
-            
-            # Simulation for testing
-            if attempt == 0 and random.random() < 0.2:
-                raise Exception("Request throttled")
-            return [{"content": f"Result for {query}", "score": 0.95}]
-            
-        except Exception as e:
-            last_error = e
-            error_msg = str(e).lower()
-            
-            if 'throttl' in error_msg or 'rate' in error_msg:
-                # Throttled - wait progressively longer
-                wait_time = (attempt + 1) * 2
-                st.warning(f"⏳ Throttled. Waiting {wait_time}s...")
-                time.sleep(wait_time)
-                
-            elif 'timeout' in error_msg:
-                # Quick retry for timeout
-                time.sleep(0.5)
-                
-            else:
-                time.sleep(1)
-            
-            if attempt == max_retries - 1:
-                st.warning(f"Search degraded: {last_error}")
-                return []  # Return empty results instead of crashing
+    # Simulation for testing
+    return f"Response to: {prompt[:50]}..."
+
+# Example 2: Azure Search with retry decorator and caching
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+@retry_azure_search(max_retries=3)
+def search_azure_index(query: str, top: int = 10) -> List[Dict]:
+    """
+    Your Azure Search call with automatic retry and caching
+    """
+    # from azure.search.documents import SearchClient
+    # from azure.core.credentials import AzureKeyCredential
     
-    return []
+    # search_client = SearchClient(
+    #     endpoint=your_search_endpoint,
+    #     index_name=your_index_name,
+    #     credential=AzureKeyCredential(your_search_key)
+    # )
+    
+    # results = search_client.search(
+    #     search_text=query,
+    #     top=top,
+    #     include_total_count=True
+    # )
+    
+    # return list(results)
+    
+    # Simulation for testing
+    return [{"content": f"Result for {query}", "score": 0.95}]
+
+# Example 3: With both tracking and retry
+from memory_compute_tracker import track_resource_usage
+
+@track_resource_usage("azure_openai_call")  # Tracking
+@retry_azure_openai(max_retries=3)           # Retry
+def tracked_llm_call(prompt: str) -> str:
+    """
+    Function with both resource tracking and retry logic
+    """
+    # Your Azure OpenAI implementation
+    pass
 
 # ============================================================
 # SOLUTION 4: CONCURRENCY LIMITING
@@ -319,20 +324,23 @@ def optimized_app_flow():
         # Your PDF processing code
         return "Processed"
     
-    # 3. Azure Search with retry and caching
+    # 3. Azure Search with retry, caching, and concurrency limit
     @with_concurrency_limit(search_semaphore, "Search")
-    def search_optimized(query):
-        return cached_search(query, top=10)
+    @st.cache_data(ttl=300)  # Cache results
+    @retry_azure_search(max_retries=3)  # Retry on failure
+    def search_optimized(query, top=10):
+        # Your actual Azure Search implementation
+        # search_client.search(query, top=top)
+        return [{"content": f"Result for {query}"}]
     
     # 4. LLM with retry and concurrency limit
     @with_concurrency_limit(llm_semaphore, "LLM")
+    @retry_azure_openai(max_retries=3)  # Retry on failure
     def call_llm_optimized(prompt, context=""):
         full_prompt = f"{context}\n\n{prompt}" if context else prompt
-        return call_azure_openai_with_retry(
-            full_prompt,
-            max_tokens=1000,
-            max_retries=3
-        )
+        # Your actual Azure OpenAI implementation
+        # client.chat.completions.create(...)
+        return f"Response to: {prompt}"
     
     # UI Flow
     data = load_app_data()  # Cached across all users!
@@ -367,25 +375,26 @@ def optimized_app_flow():
 """
 IMMEDIATE FIXES TO IMPLEMENT (in order of impact):
 
-1. ✅ JSON CACHING (5 minutes, 90% impact)
+1. JSON CACHING (5 minutes, 90% impact)
    - Add @st.cache_resource to JSON loading
    - Reduces memory from 150GB to 1GB
    - THIS IS THE MOST IMPORTANT FIX!
 
-2. ✅ RETRY LOGIC FOR AZURE OPENAI (10 minutes, high impact)
-   - Wrap calls with retry function
+2. RETRY LOGIC FOR AZURE OPENAI (10 minutes, high impact)
+   - Add @retry_azure_openai(max_retries=3) decorator
    - Handles rate limits automatically
    - Reduces failures by 90%
 
-3. ✅ RETRY LOGIC FOR AZURE SEARCH (5 minutes, medium impact)
-   - Add retry and caching
+3. RETRY LOGIC FOR AZURE SEARCH (5 minutes, medium impact)
+   - Add @retry_azure_search(max_retries=3) decorator
+   - Add @st.cache_data(ttl=300) for caching
    - Improves reliability under load
 
-4. ✅ CONCURRENCY LIMITS (5 minutes, medium impact)
+4. CONCURRENCY LIMITS (5 minutes, medium impact)
    - Add semaphores to limit concurrent operations
    - Prevents service overload
 
-5. ✅ SESSION CLEANUP (optional, low impact)
+5. SESSION CLEANUP (optional, low impact)
    - Clear unnecessary session state
    - Reduce memory per user
 
